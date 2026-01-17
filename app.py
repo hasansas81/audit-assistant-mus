@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import random
-import numpy as np
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="Audit Assistant - MUS Tool", layout="wide")
@@ -25,79 +24,87 @@ def clean_currency(x):
         return 0.0
 
 def perform_mus_audit(df, amount_col, interval, random_seed):
-    # Create a copy to avoid messing up the display dataframe
+    # 1. SETUP & CLEANING
     population = df.copy()
-    
-    # 1. CLEAN THE DATA (Crucial Fix)
-    # Apply the cleaning function to the selected column
     population[amount_col] = population[amount_col].apply(clean_currency)
-    
-    # MUS operates on absolute values (in case of credit notes)
     population['Abs_Amount'] = population[amount_col].abs()
     
-    # Calculate Cumulative Amount
-    population['Cumulative_Amount'] = population['Abs_Amount'].cumsum()
-    population['Previous_Cumulative'] = population['Cumulative_Amount'] - population['Abs_Amount']
+    # Calculate Cumulative (Running Total)
+    population['Cumulative_Balance'] = population['Abs_Amount'].cumsum()
+    population['Previous_Cumulative'] = population['Cumulative_Balance'] - population['Abs_Amount']
     
     total_value = population['Abs_Amount'].sum()
     
-    # Safety Check
+    # Validation
     if total_value == 0:
-        return pd.DataFrame(), "Error: Total population value is 0. Check your data format."
+        return None, "Error: Total population value is 0.", {}
     if interval <= 0:
-        return pd.DataFrame(), "Error: Interval must be greater than 0."
+        return None, "Error: Interval must be greater than 0.", {}
 
     # 2. RANDOM START
     random.seed(random_seed)
-    # Ensure start is within the first interval
     random_start = random.randint(1, int(interval))
     
-    print(f"Total: {total_value}, Interval: {interval}, Start: {random_start}") # Debugging
-
-    # 3. GENERATE HIT POINTS
+    # 3. GENERATE HIT POINTS (The "Dollars" we want to select)
     hit_points = []
     current_hit = random_start
     while current_hit <= total_value:
         hit_points.append(current_hit)
         current_hit += interval
         
-    # 4. SELECT ITEMS
+    # 4. FIND ITEMS CONTAINING THE HIT POINTS
     selection_results = []
     hit_idx = 0
     num_hits = len(hit_points)
 
     for index, row in population.iterrows():
         low = row['Previous_Cumulative']
-        high = row['Cumulative_Amount']
+        high = row['Cumulative_Balance']
         
-        # Check if any hit points fall within this item's range
+        # While the current "hit point" is less than the top of this item's range...
         while hit_idx < num_hits and hit_points[hit_idx] <= high:
             current_target = hit_points[hit_idx]
             
+            # If the hit point is also greater than the bottom of this item's range...
+            # Then this item "contains" the hit point.
             if current_target > low:
                 selection_results.append({
                     'Original_Index': index,
-                    'Recorded_Amount': row[amount_col], # Show original formatted amount if possible
-                    'Selected_By_Hit_Point': current_target,
-                    'Item_Type': 'High Value' if row['Abs_Amount'] >= interval else 'Sampled'
+                    'Point_Selected': current_target, # The specific dollar unit
+                    'Cumulative_Balance': high
                 })
             hit_idx += 1
 
-    results_df = pd.DataFrame(selection_results)
-    
-    if not results_df.empty:
-        # Fetch original rows
-        final_df = df.loc[results_df['Original_Index']].copy()
-        final_df['Audit_Hit_Point'] = results_df['Selected_By_Hit_Point'].values
-        final_df['Audit_Note'] = results_df['Item_Type'].values
-        return final_df, f"Success: Selected {len(final_df)} items."
+    # 5. BUILD FINAL RESULT
+    if selection_results:
+        # Create a dataframe from the findings
+        matches_df = pd.DataFrame(selection_results)
+        
+        # Merge back to get ALL original columns
+        # We perform a join to keep the original data structure
+        original_rows = df.loc[matches_df['Original_Index']].copy()
+        
+        # Add the specific Audit Columns requested
+        original_rows['Cumulative_Balance'] = matches_df['Cumulative_Balance'].values
+        original_rows['Point_Selected'] = matches_df['Point_Selected'].values
+        
+        # Add metadata for the return
+        audit_params = {
+            'total_value': total_value,
+            'random_seed': random_seed,
+            'random_start': random_start,
+            'interval': interval,
+            'count': len(original_rows)
+        }
+        
+        return original_rows, "Success", audit_params
     else:
-        return pd.DataFrame(), "No items selected. The interval might be too high."
+        return pd.DataFrame(), "No items selected. Interval too high.", {}
 
 # --- 2. THE APP INTERFACE ---
 
 st.title("🛡️ Audit Assistant: Monetary Unit Sampling")
-st.markdown("Perform statutory audit sampling with confidence.")
+st.markdown("Statutory audit tool for detailed substantive testing.")
 
 # Sidebar
 with st.sidebar:
@@ -107,31 +114,23 @@ with st.sidebar:
     st.markdown("---")
     st.header("2. Sampling Settings")
     
-    # NEW: Toggle between methods
     method = st.radio("Selection Method:", ["Target Sample Size", "Manual Interval", "Confidence Calculator"])
     
     final_interval = 0.0
     target_sample_size = 0
     
     if method == "Target Sample Size":
-        st.info("The app will calculate the Interval needed to get exactly this many items.")
-        target_sample_size = st.number_input("Number of Items to Select", value=25, min_value=1)
-        
+        target_sample_size = st.number_input("Items to Select", value=25, min_value=1)
     elif method == "Manual Interval":
-        final_interval = st.number_input("Enter Sampling Interval ($)", value=100000.0, step=1000.0)
-        
-    else: # Confidence Calculator
-        st.info("Based on Zero Expected Errors")
+        final_interval = st.number_input("Interval Amount ($)", value=100000.0, step=1000.0)
+    else:
+        st.info("Zero Expected Errors Model")
         conf_level = st.selectbox("Confidence Level", [90, 95, 99], index=1)
         tol_misstatement = st.number_input("Tolerable Misstatement ($)", value=50000.0)
-        
         if tol_misstatement > 0:
-            # R-Factor Lookup
             lookup = {90: 2.31, 95: 3.00, 99: 4.61}
-            r_factor = lookup.get(conf_level, 3.00)
-            final_interval = tol_misstatement / r_factor
+            final_interval = tol_misstatement / lookup.get(conf_level, 3.00)
             st.write(f"**Calculated Interval:** ${final_interval:,.2f}")
-            st.caption(f"Math: {tol_misstatement} / {r_factor}")
 
     st.markdown("---")
     st.header("3. Execution")
@@ -143,53 +142,62 @@ if uploaded_file is not None:
     try:
         df = pd.read_csv(uploaded_file)
         
-        # Select Column (Allow all columns initially, in case pandas misidentified types)
-        all_cols = df.columns.tolist()
-        
+        # Data Preview
         st.write("### Data Preview")
-        st.dataframe(df.head(5)) # Showing 5 rows now
+        st.dataframe(df.head(5))
         
+        # Column Selection
+        all_cols = df.columns.tolist()
         col1, col2 = st.columns(2)
         with col1:
              amount_col = st.selectbox("Select Amount Column", all_cols)
         
-        # DYNAMIC CALCULATION: Show Total Value immediately
-        # We clean the data *just for the display* here to check if it works
+        # Dynamic Total Calculation
         temp_clean = df[amount_col].apply(clean_currency)
         total_val = temp_clean.abs().sum()
         
         with col2:
             st.metric("Total Population Value", f"${total_val:,.2f}")
-            if total_val == 0:
-                st.error("⚠️ The total is 0. Please select the correct column containing financial amounts.")
 
-        # LOGIC FOR TARGET SAMPLE SIZE
+        # Recalculate Interval if "Target Sample Size" is chosen
         if method == "Target Sample Size" and total_val > 0:
-            # Formula: Interval = Population / Sample Size
-            calculated_interval = total_val / target_sample_size
-            final_interval = calculated_interval
-            st.info(f"**Calculated Interval:** ${final_interval:,.2f} (to get ~{target_sample_size} items)")
+            final_interval = total_val / target_sample_size
+            st.info(f"**Interval:** ${final_interval:,.2f} (Target: {target_sample_size} items)")
 
         if run_btn:
             if final_interval <= 0:
                 st.error("Interval must be greater than 0.")
             else:
-                with st.spinner('Running MUS Algorithm...'):
-                    result_df, message = perform_mus_audit(df, amount_col, final_interval, random_seed)
+                with st.spinner('Calculating MUS...'):
+                    result_df, msg, params = perform_mus_audit(df, amount_col, final_interval, random_seed)
                 
                 if not result_df.empty:
-                    st.success(message)
+                    st.success(f"Audit Complete: {params['count']} items selected.")
+                    
+                    # --- NEW: DISPLAY AUDIT PARAMETERS CLEARLY ---
+                    st.subheader("📋 Audit Parameters Report")
+                    p_col1, p_col2, p_col3, p_col4 = st.columns(4)
+                    p_col1.metric("Random Seed", params['random_seed'])
+                    p_col2.metric("Random Start", f"{params['random_start']:,}")
+                    p_col3.metric("Interval", f"${params['interval']:,.2f}")
+                    p_col4.metric("Population Total", f"${params['total_value']:,.2f}")
+                    
+                    st.divider()
+                    
+                    st.subheader("✅ Selected Sample Items")
+                    st.markdown("The table below includes the **Cumulative Balance** and the specific **Point Selected**.")
                     st.dataframe(result_df)
                     
+                    # CSV Download
                     csv = result_df.to_csv(index=False).encode('utf-8')
                     st.download_button(
-                        label="📥 Download Workpaper",
+                        label="📥 Download Audit Workpaper (CSV)",
                         data=csv,
-                        file_name='mus_audit_sample.csv',
+                        file_name='mus_audit_workpaper.csv',
                         mime='text/csv',
                     )
                 else:
-                    st.warning(message)
+                    st.warning(msg)
 
     except Exception as e:
         st.error(f"Error: {e}")
