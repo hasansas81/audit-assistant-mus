@@ -10,12 +10,16 @@ st.set_page_config(page_title="Audit Assistant - MUS Tool", layout="wide")
 # --- 1. HELPER FUNCTIONS ---
 
 def clean_currency(x):
-    """Converts string currency to float."""
+    """
+    Robust cleaning: Converts string currency/text to float.
+    Returns 0.0 if conversion fails.
+    """
     if isinstance(x, (int, float)):
-        return x
-    if pd.isna(x) or x == '':
+        return float(x)
+    if pd.isna(x) or str(x).strip() == '':
         return 0.0
-    clean_str = str(x).replace(',', '').replace(' ', '').strip()
+    # Remove commas, spaces, and currency symbols if present
+    clean_str = str(x).replace(',', '').replace(' ', '').replace('$', '').strip()
     try:
         return float(clean_str)
     except ValueError:
@@ -37,15 +41,18 @@ def generate_pdf(df, params, amount_col, desc_col):
     pdf.cell(0, 10, "1. Sampling Parameters", ln=True)
     pdf.set_font("Arial", size=10)
     
-    # List format instead of grid
     line_height = 7
+    
+    # Safely handle potentially missing keys
+    conf_level = params.get('conf_level', 'N/A')
+    conf_factor = params.get('conf_factor', 'N/A')
     
     params_list = [
         f"Execution Time:   {params['timestamp']}",
         f"Random Seed:      {params['random_seed']}",
         f"Population Total: ${params['total_value']:,.2f}",
-        f"Confidence Level: {params.get('conf_level', 'N/A')}", 
-        f"Confidence Factor:{params.get('conf_factor', 'N/A')}",
+        f"Confidence Level: {conf_level}", 
+        f"Confidence Factor:{conf_factor}",
         f"Sampling Interval:${params['interval']:,.2f}",
         f"Random Start:     {params['random_start']:,}",
         f"Items Selected:   {params['count']}"
@@ -62,38 +69,44 @@ def generate_pdf(df, params, amount_col, desc_col):
     
     # Table Header
     pdf.set_font("Arial", 'B', 8)
-    pdf.set_fill_color(220, 230, 240) # Light blue header
+    pdf.set_fill_color(220, 230, 240) # Light blue
     
-    # Define widths (A4 Landscape is approx 297mm width. Margins ~20mm. Usable ~277mm)
     w_row = 12
-    w_desc = 75   # Customer Name
-    w_amt = 35    # Balance
-    w_hit = 40    # Audit Hit
-    w_cum = 40    # Cumulative
-    w_note = 30   # Note
+    w_desc = 75   
+    w_amt = 35    
+    w_hit = 40    
+    w_cum = 40    
+    w_note = 30   
     
     pdf.cell(w_row, 8, "Row #", 1, 0, 'C', True)
     pdf.cell(w_desc, 8, "Customer / Description", 1, 0, 'L', True)
     pdf.cell(w_amt, 8, "Balance", 1, 0, 'R', True)
     pdf.cell(w_hit, 8, "Audit Hit Point", 1, 0, 'R', True)
     pdf.cell(w_cum, 8, "Cumulative Bal", 1, 0, 'R', True)
-    pdf.cell(w_note, 8, "Note", 1, 1, 'C', True) # ln=1 to move to next line
+    pdf.cell(w_note, 8, "Note", 1, 1, 'C', True)
     
     # Table Rows
     pdf.set_font("Arial", size=8)
     for i, row in df.iterrows():
-        # Retrieve data using dynamic column names
+        # Retrieve data
         row_num = str(row.get('Row_Index_1_Based', ''))
         
-        # Text handling for description (truncate if too long)
+        # Description
         desc_text = str(row.get(desc_col, ''))
         if len(desc_text) > 45: desc_text = desc_text[:42] + "..."
         
-        amt_val = row.get(amount_col, 0)
-        hit_val = row.get('Audit_Hit', 0)
-        cum_val = row.get('Cumulative_Balance', 0)
+        # FIX: Force float conversion before formatting
+        # This fixes "Unknown format code 'f' for object of type 'str'"
+        try:
+            amt_val = clean_currency(row.get(amount_col, 0))
+            hit_val = clean_currency(row.get('Audit_Hit', 0))
+            cum_val = clean_currency(row.get('Cumulative_Balance', 0))
+        except:
+            amt_val, hit_val, cum_val = 0.0, 0.0, 0.0
+            
         note_val = str(row.get('Audit_Note', ''))
 
+        # Print Cells
         pdf.cell(w_row, 8, row_num, 1, 0, 'C')
         pdf.cell(w_desc, 8, desc_text, 1, 0, 'L')
         pdf.cell(w_amt, 8, f"{amt_val:,.2f}", 1, 0, 'R')
@@ -106,6 +119,8 @@ def generate_pdf(df, params, amount_col, desc_col):
 def perform_mus_audit(df, amount_col, interval, random_seed):
     # Setup
     population = df.copy()
+    
+    # Clean Data
     population[amount_col] = population[amount_col].apply(clean_currency)
     population['Abs_Amount'] = population[amount_col].abs()
     
@@ -157,7 +172,7 @@ def perform_mus_audit(df, amount_col, interval, random_seed):
     if selection_results:
         matches_df = pd.DataFrame(selection_results)
         
-        # Merge back to get ALL original columns
+        # Merge back
         original_rows = df.loc[matches_df['Original_Index']].copy()
         
         # Add Audit Columns
@@ -165,7 +180,7 @@ def perform_mus_audit(df, amount_col, interval, random_seed):
         original_rows['Audit_Hit'] = matches_df['Audit_Hit'].values
         original_rows['Audit_Note'] = matches_df['Audit_Note'].values
         
-        # Create 1-based Index for reporting
+        # 1-based Index creation (Original Index + 1)
         original_rows['Row_Index_1_Based'] = matches_df['Original_Index'].values + 1
         
         # Metadata
@@ -223,7 +238,6 @@ with st.sidebar:
             st.write(f"**Confidence Factor:** {factor}")
             st.write(f"**Calculated Interval:** ${final_interval:,.2f}")
             
-            # Store for PDF report
             audit_params_display['conf_level'] = f"{conf_level}%"
             audit_params_display['conf_factor'] = factor
 
@@ -238,7 +252,12 @@ if uploaded_file is not None:
         df = pd.read_csv(uploaded_file)
         
         st.write("### Data Preview")
-        st.dataframe(df.head(5))
+        
+        # --- FIX: ADJUST PREVIEW INDEX TO START AT 1 ---
+        preview_df = df.head(5).copy()
+        preview_df.index = preview_df.index + 1
+        st.dataframe(preview_df)
+        # -----------------------------------------------
         
         # Column Selectors
         all_cols = df.columns.tolist()
@@ -248,7 +267,7 @@ if uploaded_file is not None:
              amount_col = st.selectbox("Select Amount Column", all_cols)
         
         with col2:
-             # Try to guess the description column (usually contains "Name", "Desc", "Customer")
+             # Guess Description
              default_idx = 0
              for i, col in enumerate(all_cols):
                  if any(x in col.lower() for x in ['customer', 'desc', 'name', 'details']):
@@ -273,7 +292,6 @@ if uploaded_file is not None:
             else:
                 with st.spinner('Calculating...'):
                     result_df, msg, params = perform_mus_audit(df, amount_col, final_interval, random_seed)
-                    # Add extra params for PDF if they exist
                     params.update(audit_params_display)
                 
                 if not result_df.empty:
@@ -281,6 +299,7 @@ if uploaded_file is not None:
                     
                     # --- PARAMETERS REPORT ---
                     st.subheader("📋 Audit Parameters Report")
+                    
                     p_col1, p_col2, p_col3, p_col4 = st.columns(4)
                     p_col1.metric("Random Seed", params['random_seed'])
                     p_col2.metric("Random Start", f"{params['random_start']:,}")
@@ -292,10 +311,16 @@ if uploaded_file is not None:
                     # --- RESULTS TABLE ---
                     st.subheader("✅ Selected Sample Items")
                     
-                    # Rounding for Display/CSV (2 decimal places)
-                    display_df = result_df.copy()
+                    # Display logic: Reorder so "Row Index" is first
+                    display_cols = ['Row_Index_1_Based'] + [c for c in result_df.columns if c != 'Row_Index_1_Based']
+                    display_df = result_df[display_cols].copy()
+                    
+                    # Rounding for Display/CSV
                     display_df['Audit_Hit'] = display_df['Audit_Hit'].round(2)
                     display_df['Cumulative_Balance'] = display_df['Cumulative_Balance'].round(2)
+                    
+                    # Make Index clean in display
+                    display_df.set_index('Row_Index_1_Based', inplace=True)
                     
                     st.dataframe(display_df)
                     
@@ -303,8 +328,8 @@ if uploaded_file is not None:
                     st.subheader("💾 Export Workpapers")
                     e_col1, e_col2 = st.columns(2)
                     
-                    # 1. CSV Download (Ensure 2 decimals in file)
-                    csv = display_df.to_csv(index=False).encode('utf-8')
+                    # 1. CSV Download
+                    csv = display_df.to_csv().encode('utf-8')
                     with e_col1:
                         st.download_button(
                             label="📥 Download as CSV",
@@ -315,7 +340,6 @@ if uploaded_file is not None:
                     
                     # 2. PDF Download
                     try:
-                        # Pass column names so PDF knows what to print
                         pdf_bytes = generate_pdf(result_df, params, amount_col, desc_col)
                         with e_col2:
                             st.download_button(
