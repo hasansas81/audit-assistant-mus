@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import random
 from datetime import datetime
+import pytz # New library for Time Zones
 from fpdf import FPDF
 
 # --- PAGE CONFIGURATION ---
@@ -18,14 +19,14 @@ def clean_currency(x):
         return float(x)
     if pd.isna(x) or str(x).strip() == '':
         return 0.0
-    # Remove commas, spaces, and currency symbols
-    clean_str = str(x).replace(',', '').replace(' ', '').replace('$', '').strip()
+    # Remove commas, spaces, and specific currency symbols
+    clean_str = str(x).replace(',', '').replace(' ', '').replace('$', '').replace('R', '').replace('£', '').strip()
     try:
         return float(clean_str)
     except ValueError:
         return 0.0
 
-def generate_pdf(df, params, amount_col, desc_col):
+def generate_pdf(df, params, amount_col, desc_col, currency_symbol):
     """Generates a PDF Audit Working Paper with 2-column Parameter Table."""
     pdf = FPDF(orientation='L', unit='mm', format='A4')
     pdf.add_page()
@@ -44,7 +45,6 @@ def generate_pdf(df, params, amount_col, desc_col):
     pdf.set_font("Arial", 'B', 10)
     pdf.set_fill_color(220, 230, 240) # Light blue
     
-    # Column Widths
     w_param = 60
     w_result = 80
     h_line = 7
@@ -58,11 +58,12 @@ def generate_pdf(df, params, amount_col, desc_col):
     
     param_rows = [
         ("Execution Time", str(params['timestamp'])),
+        ("Time Zone", str(params['timezone'])),
         ("Random Seed", str(params['random_seed'])),
-        ("Population Total", f"${params['total_value']:,.2f}"),
+        ("Population Total", f"{currency_symbol}{params['total_value']:,.2f}"),
         ("Confidence Level", str(conf_level)),
         ("Confidence Factor", str(conf_factor)),
-        ("Sampling Interval", f"${params['interval']:,.2f}"),
+        ("Sampling Interval", f"{currency_symbol}{params['interval']:,.2f}"),
         ("Random Start", f"{params['random_start']:,}"),
         ("Items Selected", str(params['count']))
     ]
@@ -70,7 +71,6 @@ def generate_pdf(df, params, amount_col, desc_col):
     pdf.set_font("Arial", size=10)
     for name, value in param_rows:
         pdf.cell(w_param, h_line, name, 1, 0, 'L')
-        # Ensure value is treated as string for PDF
         pdf.cell(w_result, h_line, str(value), 1, 1, 'R')
         
     pdf.ln(10)
@@ -105,7 +105,6 @@ def generate_pdf(df, params, amount_col, desc_col):
         desc_text = str(row.get(desc_col, ''))
         if len(desc_text) > 45: desc_text = desc_text[:42] + "..."
         
-        # Safe Float Conversion
         try:
             amt_val = clean_currency(row.get(amount_col, 0))
             hit_val = clean_currency(row.get('Audit_Hit', 0))
@@ -124,7 +123,7 @@ def generate_pdf(df, params, amount_col, desc_col):
         
     return pdf.output(dest='S').encode('latin-1')
 
-def perform_mus_audit(df, amount_col, interval, random_seed):
+def perform_mus_audit(df, amount_col, interval, random_seed, tz_name):
     # Setup
     population = df.copy()
     
@@ -143,13 +142,19 @@ def perform_mus_audit(df, amount_col, interval, random_seed):
     if interval <= 0:
         return None, "Error: Interval must be > 0.", {}
 
-    run_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # TIMEZONE HANDLING
+    try:
+        local_tz = pytz.timezone(tz_name)
+        run_timestamp = datetime.now(local_tz).strftime("%Y-%m-%d %H:%M:%S")
+    except:
+        # Fallback if timezone fails
+        run_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S (UTC)")
 
     # Random Start
     random.seed(random_seed)
     random_start = random.randint(1, int(interval))
     
-    # Hit Points Logic
+    # Hit Points
     hit_points = []
     current_hit = random_start
     while current_hit <= total_value:
@@ -178,19 +183,16 @@ def perform_mus_audit(df, amount_col, interval, random_seed):
 
     if selection_results:
         matches_df = pd.DataFrame(selection_results)
-        
-        # Merge back
         original_rows = df.loc[matches_df['Original_Index']].copy()
         
-        # Add Audit Columns
         original_rows['Cumulative_Balance'] = matches_df['Cumulative_Balance'].values
         original_rows['Audit_Hit'] = matches_df['Audit_Hit'].values
         original_rows['Audit_Note'] = matches_df['Audit_Note'].values
         original_rows['Row_Index_1_Based'] = matches_df['Original_Index'].values + 1
         
-        # Metadata
         audit_params = {
             'timestamp': run_timestamp,
+            'timezone': tz_name,
             'total_value': total_value,
             'random_seed': random_seed,
             'random_start': random_start,
@@ -205,9 +207,8 @@ def perform_mus_audit(df, amount_col, interval, random_seed):
 # --- 2. THE APP INTERFACE ---
 
 st.title("🛡️ Audit Assistant: Monetary Unit Sampling")
-st.markdown("Statutory audit tool for detailed substantive testing.")
 
-# Initialize Session State to store results
+# Initialize Session State
 if 'audit_result_df' not in st.session_state:
     st.session_state.audit_result_df = None
 if 'audit_params' not in st.session_state:
@@ -221,7 +222,18 @@ with st.sidebar:
     uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
     
     st.markdown("---")
-    st.header("2. Sampling Settings")
+    st.header("2. Regional Settings")
+    
+    # CURRENCY SELECTOR
+    currency_symbol = st.selectbox("Currency Symbol", ["R", "$", "€", "£", "¥"], index=0)
+    
+    # TIMEZONE SELECTOR
+    # Common Timezones, defaulting to South Africa (Johannesburg)
+    common_timezones = ['Africa/Johannesburg', 'UTC', 'Europe/London', 'America/New_York', 'Australia/Sydney']
+    selected_timezone = st.selectbox("Time Zone", common_timezones, index=0)
+
+    st.markdown("---")
+    st.header("3. Sampling Settings")
     
     method = st.radio("Selection Method:", ["Target Sample Size", "Manual Interval", "Confidence Calculator"])
     
@@ -232,13 +244,13 @@ with st.sidebar:
     if method == "Target Sample Size":
         target_sample_size = st.number_input("Items to Select", value=25, min_value=1)
     elif method == "Manual Interval":
-        final_interval = st.number_input("Interval Amount ($)", value=100000.0, step=1000.0)
+        final_interval = st.number_input(f"Interval Amount ({currency_symbol})", value=100000.0, step=1000.0)
     else:
         st.info("Zero Expected Errors Model")
         confidence_options = [50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 98, 99]
         conf_level = st.selectbox("Confidence Level (%)", confidence_options, index=9)
         
-        tol_misstatement = st.number_input("Tolerable Misstatement ($)", value=50000.0)
+        tol_misstatement = st.number_input(f"Tolerable Misstatement ({currency_symbol})", value=50000.0)
         
         if tol_misstatement > 0:
             lookup = {
@@ -249,29 +261,20 @@ with st.sidebar:
             factor = lookup.get(conf_level, 3.0)
             final_interval = tol_misstatement / factor
             st.write(f"**Confidence Factor:** {factor}")
-            st.write(f"**Calculated Interval:** ${final_interval:,.2f}")
+            st.write(f"**Calculated Interval:** {currency_symbol}{final_interval:,.2f}")
             
             audit_params_display['conf_level'] = f"{conf_level}%"
             audit_params_display['conf_factor'] = factor
 
     st.markdown("---")
-    st.header("3. Execution")
+    st.header("4. Execution")
     random_seed = st.number_input("Random Seed", value=12345, step=1)
     
-    # Run Button
     if st.button("Run Sampling"):
-        # We process here and save to Session State
-        if uploaded_file is not None and final_interval > 0:
+        if uploaded_file is not None:
              try:
-                # Re-read file to ensure fresh start
                 uploaded_file.seek(0)
                 df = pd.read_csv(uploaded_file)
-                
-                # Auto-detect columns again for logic (need to match UI selection below)
-                # NOTE: For perfect sync, we grab columns from main area, but since button is in sidebar,
-                # we rely on the user having selected the right ones. 
-                # To be safe, we will grab the columns from the main logic flow below,
-                # but we need a trigger.
                 st.session_state.trigger_run = True
              except Exception as e:
                 st.error(f"Error: {e}")
@@ -282,13 +285,11 @@ if uploaded_file is not None:
         uploaded_file.seek(0)
         df = pd.read_csv(uploaded_file)
         
-        # Preview Fix (Index + 1)
         st.write("### Data Preview")
         preview_df = df.head(5).copy()
         preview_df.index = preview_df.index + 1
         st.dataframe(preview_df)
         
-        # Column Selectors
         all_cols = df.columns.tolist()
         col1, col2, col3 = st.columns(3)
         
@@ -308,30 +309,29 @@ if uploaded_file is not None:
         total_val = temp_clean.abs().sum()
         
         with col3:
-            st.metric("Total Population Value", f"${total_val:,.2f}")
+            st.metric("Total Population Value", f"{currency_symbol}{total_val:,.2f}")
 
         if method == "Target Sample Size" and total_val > 0:
             final_interval = total_val / target_sample_size
-            st.info(f"**Interval:** ${final_interval:,.2f} (Target: {target_sample_size} items)")
+            st.info(f"**Interval:** {currency_symbol}{final_interval:,.2f} (Target: {target_sample_size} items)")
 
-        # --- LOGIC TO HANDLE RUNNING AND SAVING STATE ---
+        # RUN LOGIC
         if st.session_state.get('trigger_run', False):
             if final_interval <= 0:
                 st.error("Interval must be greater than 0.")
             else:
                 with st.spinner('Calculating...'):
-                    result_df, msg, params = perform_mus_audit(df, amount_col, final_interval, random_seed)
+                    # Pass Timezone here
+                    result_df, msg, params = perform_mus_audit(df, amount_col, final_interval, random_seed, selected_timezone)
                     params.update(audit_params_display)
                     
-                    # SAVE TO SESSION STATE
                     st.session_state.audit_result_df = result_df
                     st.session_state.audit_params = params
                     st.session_state.audit_msg = msg
             
-            # Reset trigger
             st.session_state.trigger_run = False
 
-        # --- DISPLAY RESULTS FROM STATE ---
+        # DISPLAY RESULTS
         if st.session_state.audit_result_df is not None:
             res_df = st.session_state.audit_result_df
             p = st.session_state.audit_params
@@ -339,29 +339,26 @@ if uploaded_file is not None:
             if not res_df.empty:
                 st.success(f"Audit Complete: {p['count']} items selected.")
                 
-                # Parameters Report
                 st.subheader("📋 Audit Parameters Report")
                 p_col1, p_col2, p_col3, p_col4 = st.columns(4)
                 p_col1.metric("Random Seed", p['random_seed'])
                 p_col2.metric("Random Start", f"{p['random_start']:,}")
-                p_col3.metric("Interval", f"${p['interval']:,.2f}")
-                p_col4.metric("Population Total", f"${p['total_value']:,.2f}")
+                p_col3.metric("Interval", f"{currency_symbol}{p['interval']:,.2f}")
+                p_col4.metric("Population Total", f"{currency_symbol}{p['total_value']:,.2f}")
                 
+                st.caption(f"Time Zone: {p.get('timezone', 'UTC')} | Run Time: {p.get('timestamp')}")
                 st.divider()
                 
-                # Results Table
                 st.subheader("✅ Selected Sample Items")
                 display_cols = ['Row_Index_1_Based'] + [c for c in res_df.columns if c != 'Row_Index_1_Based']
                 display_df = res_df[display_cols].copy()
                 
-                # Rounding
                 display_df['Audit_Hit'] = display_df['Audit_Hit'].round(2)
                 display_df['Cumulative_Balance'] = display_df['Cumulative_Balance'].round(2)
                 display_df.set_index('Row_Index_1_Based', inplace=True)
                 
                 st.dataframe(display_df)
                 
-                # --- EXPORT SECTION (Persistent Buttons) ---
                 st.subheader("💾 Export Workpapers")
                 e_col1, e_col2 = st.columns(2)
                 
@@ -375,7 +372,8 @@ if uploaded_file is not None:
                     )
                 
                 try:
-                    pdf_bytes = generate_pdf(res_df, p, amount_col, desc_col)
+                    # Pass currency symbol to PDF generator
+                    pdf_bytes = generate_pdf(res_df, p, amount_col, desc_col, currency_symbol)
                     with e_col2:
                         st.download_button(
                             label="📄 Download as PDF",
