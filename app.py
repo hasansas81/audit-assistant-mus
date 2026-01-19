@@ -4,7 +4,7 @@ import random
 from datetime import datetime
 import pytz
 from fpdf import FPDF
-import re # Added for Regex cleaning
+import re
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="Audit Assistant - MUS Tool", layout="wide")
@@ -118,23 +118,25 @@ def generate_pdf(df, params, amount_col, desc_col, currency_symbol):
     pdf.cell(w_param, h_line, "Parameter", 1, 0, 'L', True)
     pdf.cell(w_result, h_line, "Result", 1, 1, 'L', True)
     
+    # Safe retrieval of parameters with defaults to prevent crashes
     conf_level = params.get('conf_level', 'N/A')
     conf_factor = params.get('conf_factor', 'N/A')
     
-    # Use ABSOLUTE Total for sampling info, but maybe show Net for control?
-    # Standard MUS reports usually reference the Absolute Population tested.
+    net_total = params.get('net_total', 0.0)
+    total_val = params.get('total_value', 0.0)
+    interval = params.get('interval', 0.0)
     
     param_rows = [
-        ("Execution Time", str(params['timestamp'])),
-        ("Time Zone", str(params['timezone'])),
-        ("Random Seed", str(params['random_seed'])),
-        ("Net Control Total", f"{currency_symbol}{float(params['net_total']):,.2f}"),
-        ("Abs. Sampling Pop.", f"{currency_symbol}{float(params['total_value']):,.2f}"),
+        ("Execution Time", str(params.get('timestamp', 'N/A'))),
+        ("Time Zone", str(params.get('timezone', 'UTC'))),
+        ("Random Seed", str(params.get('random_seed', 'N/A'))),
+        ("Net Control Total", f"{currency_symbol}{float(net_total):,.2f}"),
+        ("Abs. Sampling Pop.", f"{currency_symbol}{float(total_val):,.2f}"),
         ("Confidence Level", str(conf_level)),
         ("Confidence Factor", str(conf_factor)),
-        ("Sampling Interval", f"{currency_symbol}{float(params['interval']):,.2f}"),
-        ("Random Start", f"{params['random_start']:,}"),
-        ("Items Selected", str(params['count']))
+        ("Sampling Interval", f"{currency_symbol}{float(interval):,.2f}"),
+        ("Random Start", f"{params.get('random_start', 0):,}"),
+        ("Items Selected", str(params.get('count', 0)))
     ]
 
     pdf.set_font("Arial", size=10)
@@ -181,20 +183,17 @@ def perform_mus_audit(df, amount_col, interval, random_seed, tz_name):
     # Setup
     population = df.copy()
     
-    # Clean Data using the NEW Robust Cleaner
+    # Clean Data
     population[amount_col] = population[amount_col].apply(clean_currency)
     
-    # IMPORTANT: MUS uses Absolute Value for sampling logic
-    # But we preserve the original sign for the "Balance" display
+    # MUS uses Absolute Value for sampling logic
     population['Abs_Amount'] = population[amount_col].abs()
     
-    # Calculate NET total for Control purposes (e.g. -279M)
+    # Totals
     net_total = population[amount_col].sum()
-    
-    # Calculate ABSOLUTE total for Sampling purposes (e.g. 375M)
     abs_total_value = population['Abs_Amount'].sum()
     
-    # Cumulative Calculation on ABSOLUTE amounts
+    # Cumulative Calculation
     population['Cumulative_Balance'] = population['Abs_Amount'].cumsum()
     population['Previous_Cumulative'] = population['Cumulative_Balance'] - population['Abs_Amount']
     
@@ -245,8 +244,7 @@ def perform_mus_audit(df, amount_col, interval, random_seed, tz_name):
         matches_df = pd.DataFrame(selection_results)
         original_rows = df.loc[matches_df['Original_Index']].copy()
         
-        # We need to make sure the "Balance" column in the result is the CLEANED number (with negatives)
-        # otherwise it might show the original text string like "(500)"
+        # Ensure 'Balance' column is the cleaned number
         original_rows[amount_col] = population.loc[matches_df['Original_Index'], amount_col]
         
         original_rows['Cumulative_Balance'] = matches_df['Cumulative_Balance'].values
@@ -257,8 +255,8 @@ def perform_mus_audit(df, amount_col, interval, random_seed, tz_name):
         audit_params = {
             'timestamp': run_timestamp,
             'timezone': tz_name,
-            'total_value': abs_total_value, # The sampling population
-            'net_total': net_total,         # The control total (-279M)
+            'total_value': abs_total_value,
+            'net_total': net_total, 
             'random_seed': random_seed,
             'random_start': random_start,
             'interval': interval,
@@ -303,7 +301,7 @@ with st.sidebar:
     target_sample_size = 0
     audit_params_display = {}
     
-    # We must access the data to show total value, but we defer calculation until data loads
+    # Defer calculations to main area to ensure data is loaded
     
     if method == "Target Sample Size":
         target_sample_size = st.number_input("Items to Select", value=25, min_value=1)
@@ -338,7 +336,6 @@ with st.sidebar:
         if uploaded_file is not None:
              try:
                 uploaded_file.seek(0)
-                # Just reading to ensure valid CSV
                 df_check = pd.read_csv(uploaded_file)
                 st.session_state.trigger_run = True
              except Exception as e:
@@ -369,16 +366,13 @@ if uploaded_file is not None:
                      break
              desc_col = st.selectbox("Select Description/Customer Column", all_cols, index=default_idx)
              
-        # DYNAMIC TOTAL CALCULATION (Updated for Dual Totals)
-        # Apply cleaner to get the real numeric series
+        # DYNAMIC TOTAL CALCULATION
         clean_series = df[amount_col].apply(clean_currency)
         net_total_val = clean_series.sum()
         abs_total_val = clean_series.abs().sum()
         
         with col3:
-            # Show Net Total (Control)
-            st.metric("Net Control Total (Net)", f"{currency_symbol}{net_total_val:,.2f}")
-            # Show Absolute Total (For Sampling)
+            st.metric("Net Control Total", f"{currency_symbol}{net_total_val:,.2f}")
             st.caption(f"Abs. Sampling Pop: {currency_symbol}{abs_total_val:,.2f}")
 
         if method == "Target Sample Size" and abs_total_val > 0:
@@ -391,7 +385,6 @@ if uploaded_file is not None:
                 st.error("Interval must be greater than 0.")
             else:
                 with st.spinner('Calculating...'):
-                    # Pass Timezone here
                     result_df, msg, params = perform_mus_audit(df, amount_col, final_interval, random_seed, selected_timezone)
                     params.update(audit_params_display)
                     
@@ -407,17 +400,18 @@ if uploaded_file is not None:
             p = st.session_state.audit_params
             
             if not res_df.empty:
-                st.success(f"Audit Complete: {p['count']} items selected.")
+                st.success(f"Audit Complete: {p.get('count',0)} items selected.")
                 
                 st.subheader("📋 Audit Parameters Report")
                 p_col1, p_col2, p_col3, p_col4 = st.columns(4)
-                p_col1.metric("Random Seed", p['random_seed'])
-                p_col2.metric("Random Start", f"{p['random_start']:,}")
-                p_col3.metric("Interval", f"{currency_symbol}{p['interval']:,.2f}")
-                # Show both totals in the final report
-                p_col4.metric("Net Control Total", f"{currency_symbol}{p['net_total']:,.2f}")
                 
-                st.caption(f"Absolute Sampling Population: {currency_symbol}{p['total_value']:,.2f} | Time Zone: {p.get('timezone', 'UTC')}")
+                # SAFE DISPLAY using .get() to prevent KeyErrors from stale state
+                p_col1.metric("Random Seed", p.get('random_seed', 0))
+                p_col2.metric("Random Start", f"{p.get('random_start', 0):,}")
+                p_col3.metric("Interval", f"{currency_symbol}{p.get('interval', 0):,.2f}")
+                p_col4.metric("Net Control Total", f"{currency_symbol}{p.get('net_total', 0):,.2f}")
+                
+                st.caption(f"Absolute Sampling Population: {currency_symbol}{p.get('total_value', 0):,.2f} | Time Zone: {p.get('timezone', 'UTC')}")
                 st.divider()
                 
                 st.subheader("✅ Selected Sample Items")
@@ -430,33 +424,4 @@ if uploaded_file is not None:
                 
                 st.dataframe(display_df)
                 
-                st.subheader("💾 Export Workpapers")
-                e_col1, e_col2 = st.columns(2)
-                
-                csv = display_df.to_csv().encode('utf-8')
-                with e_col1:
-                    st.download_button(
-                        label="📥 Download as CSV",
-                        data=csv,
-                        file_name='audit_sample.csv',
-                        mime='text/csv',
-                    )
-                
-                try:
-                    pdf_bytes = generate_pdf(res_df, p, amount_col, desc_col, currency_symbol)
-                    with e_col2:
-                        st.download_button(
-                            label="📄 Download as PDF",
-                            data=pdf_bytes,
-                            file_name='audit_working_paper.pdf',
-                            mime='application/pdf'
-                        )
-                except Exception as e:
-                    st.error(f"PDF Generation Error: {e}")
-            else:
-                st.warning(st.session_state.audit_msg)
-
-    except Exception as e:
-        st.error(f"Error processing file: {e}")
-else:
-    st.info("👈 Upload your client's CSV file in the sidebar to start.")
+                st.subheader("💾 Export Work
