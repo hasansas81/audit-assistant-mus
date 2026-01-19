@@ -13,7 +13,7 @@ st.set_page_config(page_title="Audit Assistant - MUS Tool", layout="wide")
 
 def clean_currency(x):
     """
-    Advanced Cleaner: Handles (100), -100, 100-, R 100.00, etc.
+    Advanced Cleaner: Handles accounting formats like (10,000.00) or 10000-
     Returns float.
     """
     if isinstance(x, (int, float)):
@@ -31,7 +31,6 @@ def clean_currency(x):
 
     # 2. Remove standard currency symbols and separators
     # Keep only digits, dots, and the minus sign
-    # We remove R, $, spaces, commas
     s_clean = re.sub(r'[R$£€¥,\s]', '', s)
     
     # 3. Handle Trailing Negatives (e.g., "500-")
@@ -118,10 +117,11 @@ def generate_pdf(df, params, amount_col, desc_col, currency_symbol):
     pdf.cell(w_param, h_line, "Parameter", 1, 0, 'L', True)
     pdf.cell(w_result, h_line, "Result", 1, 1, 'L', True)
     
-    # Safe retrieval of parameters with defaults to prevent crashes
+    # Crash-proof retrieval
     conf_level = params.get('conf_level', 'N/A')
     conf_factor = params.get('conf_factor', 'N/A')
     
+    # We display the Net Total (with sign) and the Sampling Total (Absolute)
     net_total = params.get('net_total', 0.0)
     total_val = params.get('total_value', 0.0)
     interval = params.get('interval', 0.0)
@@ -150,7 +150,8 @@ def generate_pdf(df, params, amount_col, desc_col, currency_symbol):
     pdf.set_font("Arial", 'B', 12)
     pdf.cell(0, 10, "2. Selected Sample Items", ln=True)
     
-    header_names = ["Row #", "Customer / Description", "Balance", "Audit Hit Point", "Cumulative Bal", "Note"]
+    # Column Headers - Cumulative is labelled "Abs" to explain why it increases
+    header_names = ["Row #", "Customer / Description", "Balance", "Audit Hit Point", "Cumulative (Abs)", "Note"]
     col_widths = [12, 75, 35, 40, 40, 30]
     
     pdf.set_table_cols(header_names, col_widths)
@@ -165,6 +166,7 @@ def generate_pdf(df, params, amount_col, desc_col, currency_symbol):
         desc_text = str(row.get(desc_col, ''))
         if len(desc_text) > 45: desc_text = desc_text[:42] + "..."
         
+        # Clean values for display
         amt_val = clean_currency(row.get(amount_col, 0))
         hit_val = clean_currency(row.get('Audit_Hit', 0))
         cum_val = clean_currency(row.get('Cumulative_Balance', 0))
@@ -183,17 +185,17 @@ def perform_mus_audit(df, amount_col, interval, random_seed, tz_name):
     # Setup
     population = df.copy()
     
-    # Clean Data
+    # Clean Data using the NEW Robust Cleaner
     population[amount_col] = population[amount_col].apply(clean_currency)
     
-    # MUS uses Absolute Value for sampling logic
+    # IMPORTANT: MUS uses Absolute Value for sampling logic
     population['Abs_Amount'] = population[amount_col].abs()
     
     # Totals
     net_total = population[amount_col].sum()
     abs_total_value = population['Abs_Amount'].sum()
     
-    # Cumulative Calculation
+    # Cumulative Calculation on ABSOLUTE amounts
     population['Cumulative_Balance'] = population['Abs_Amount'].cumsum()
     population['Previous_Cumulative'] = population['Cumulative_Balance'] - population['Abs_Amount']
     
@@ -244,7 +246,7 @@ def perform_mus_audit(df, amount_col, interval, random_seed, tz_name):
         matches_df = pd.DataFrame(selection_results)
         original_rows = df.loc[matches_df['Original_Index']].copy()
         
-        # Ensure 'Balance' column is the cleaned number
+        # Ensure 'Balance' column is the cleaned number (to preserve sign)
         original_rows[amount_col] = population.loc[matches_df['Original_Index'], amount_col]
         
         original_rows['Cumulative_Balance'] = matches_df['Cumulative_Balance'].values
@@ -300,8 +302,6 @@ with st.sidebar:
     final_interval = 0.0
     target_sample_size = 0
     audit_params_display = {}
-    
-    # Defer calculations to main area to ensure data is loaded
     
     if method == "Target Sample Size":
         target_sample_size = st.number_input("Items to Select", value=25, min_value=1)
@@ -366,7 +366,7 @@ if uploaded_file is not None:
                      break
              desc_col = st.selectbox("Select Description/Customer Column", all_cols, index=default_idx)
              
-        # DYNAMIC TOTAL CALCULATION
+        # DYNAMIC TOTAL CALCULATION (Using Cleaner)
         clean_series = df[amount_col].apply(clean_currency)
         net_total_val = clean_series.sum()
         abs_total_val = clean_series.abs().sum()
@@ -405,7 +405,6 @@ if uploaded_file is not None:
                 st.subheader("📋 Audit Parameters Report")
                 p_col1, p_col2, p_col3, p_col4 = st.columns(4)
                 
-                # SAFE DISPLAY using .get() to prevent KeyErrors from stale state
                 p_col1.metric("Random Seed", p.get('random_seed', 0))
                 p_col2.metric("Random Start", f"{p.get('random_start', 0):,}")
                 p_col3.metric("Interval", f"{currency_symbol}{p.get('interval', 0):,.2f}")
@@ -454,4 +453,3 @@ if uploaded_file is not None:
         st.error(f"Error processing file: {e}")
 else:
     st.info("👈 Upload your client's CSV file in the sidebar to start.")
-
