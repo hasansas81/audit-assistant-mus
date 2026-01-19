@@ -4,6 +4,7 @@ import random
 from datetime import datetime
 import pytz
 from fpdf import FPDF
+import re # Added for Regex cleaning
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="Audit Assistant - MUS Tool", layout="wide")
@@ -12,17 +13,37 @@ st.set_page_config(page_title="Audit Assistant - MUS Tool", layout="wide")
 
 def clean_currency(x):
     """
-    Robust cleaning: Converts string currency/text to float.
-    Returns 0.0 if conversion fails.
+    Advanced Cleaner: Handles (100), -100, 100-, R 100.00, etc.
+    Returns float.
     """
     if isinstance(x, (int, float)):
         return float(x)
-    if pd.isna(x) or str(x).strip() == '':
+    
+    s = str(x).strip()
+    if not s or s.lower() == 'nan':
         return 0.0
-    # Remove commas, spaces, and currency symbols
-    clean_str = str(x).replace(',', '').replace(' ', '').replace('$', '').replace('R', '').replace('£', '').strip()
+    
+    # 1. Check if it looks like a negative in parentheses: (123.45)
+    is_bracket_negative = False
+    if s.startswith('(') and s.endswith(')'):
+        is_bracket_negative = True
+        s = s[1:-1] # Remove brackets
+
+    # 2. Remove standard currency symbols and separators
+    # Keep only digits, dots, and the minus sign
+    # We remove R, $, spaces, commas
+    s_clean = re.sub(r'[R$£€¥,\s]', '', s)
+    
+    # 3. Handle Trailing Negatives (e.g., "500-")
+    if s_clean.endswith('-'):
+        s_clean = '-' + s_clean[:-1]
+        
     try:
-        return float(clean_str)
+        val = float(s_clean)
+        # Apply the bracket negative logic
+        if is_bracket_negative:
+            val = -abs(val)
+        return val
     except ValueError:
         return 0.0
 
@@ -30,41 +51,36 @@ def clean_currency(x):
 class AuditPDF(FPDF):
     def __init__(self, orientation='L', unit='mm', format='A4'):
         super().__init__(orientation, unit, format)
-        self.is_table_active = False # Flag to know when to start repeating headers
+        self.is_table_active = False 
         self.col_widths = []
         self.col_names = []
 
     def header(self):
-        # 1. WATERMARK (Grey, Large, Centered at top)
+        # 1. WATERMARK
         self.set_font('Arial', 'B', 30)
         self.set_text_color(240, 240, 240) # Very Light Grey
-        # Position at 40mm down, centered
         self.text(60, 25, "Prepared by Audit Assistant") 
         
-        # 2. Main Title (Only on Page 1 technically, but we keep it simple or strictly generic)
+        # 2. Main Title (Page 1 only)
         if self.page_no() == 1:
-            self.set_y(10) # Reset Y
+            self.set_y(10)
             self.set_font("Arial", 'B', 16)
-            self.set_text_color(0, 0, 0) # Black
+            self.set_text_color(0, 0, 0)
             self.cell(0, 10, "Audit Working Paper: Monetary Unit Sampling", ln=True, align='C')
             self.ln(5)
         else:
-            # On subsequent pages, give a little space before the table starts
             self.set_y(20)
 
-        # 3. REPEATING TABLE HEADER (Only if table has started)
+        # 3. REPEATING TABLE HEADER
         if self.page_no() > 1 and self.is_table_active:
             self.print_table_header()
 
     def footer(self):
         self.set_y(-15)
         self.set_font('Arial', 'I', 8)
-        self.set_text_color(128, 128, 128) # Grey
+        self.set_text_color(128, 128, 128)
         
-        # Terms and Conditions
         self.cell(0, 10, 'Terms & Conditions: Generated for audit purposes. Auditor to verify all selections.', 0, 0, 'L')
-        
-        # Page Number (Page x of y)
         self.cell(0, 10, f'Page {self.page_no()} of {{nb}}', 0, 0, 'R')
 
     def set_table_cols(self, names, widths):
@@ -78,22 +94,20 @@ class AuditPDF(FPDF):
         
         for name, width in zip(self.col_names, self.col_widths):
             self.cell(width, 8, name, 1, 0, 'C', True)
-        self.ln() # End line
+        self.ln()
 
 def generate_pdf(df, params, amount_col, desc_col, currency_symbol):
-    """Generates a professional Audit PDF with repeating headers."""
+    """Generates a professional Audit PDF."""
     
-    # Initialize Custom Class
     pdf = AuditPDF(orientation='L', unit='mm', format='A4')
-    pdf.alias_nb_pages() # Required for the '{nb}' page count to work
+    pdf.alias_nb_pages()
     pdf.add_page()
     pdf.set_font("Arial", size=10)
     
-    # --- 1. AUDIT PARAMETERS TABLE (Page 1 Only) ---
+    # --- 1. AUDIT PARAMETERS ---
     pdf.set_font("Arial", 'B', 12)
     pdf.cell(0, 10, "1. Sampling Parameters", ln=True)
     
-    # Table Header for Parameters
     pdf.set_font("Arial", 'B', 10)
     pdf.set_fill_color(220, 230, 240)
     
@@ -104,16 +118,18 @@ def generate_pdf(df, params, amount_col, desc_col, currency_symbol):
     pdf.cell(w_param, h_line, "Parameter", 1, 0, 'L', True)
     pdf.cell(w_result, h_line, "Result", 1, 1, 'L', True)
     
-    # Data Preparation
     conf_level = params.get('conf_level', 'N/A')
     conf_factor = params.get('conf_factor', 'N/A')
     
-    # Ensure all values are safe strings/floats
+    # Use ABSOLUTE Total for sampling info, but maybe show Net for control?
+    # Standard MUS reports usually reference the Absolute Population tested.
+    
     param_rows = [
         ("Execution Time", str(params['timestamp'])),
         ("Time Zone", str(params['timezone'])),
         ("Random Seed", str(params['random_seed'])),
-        ("Population Total", f"{currency_symbol}{float(params['total_value']):,.2f}"),
+        ("Net Control Total", f"{currency_symbol}{float(params['net_total']):,.2f}"),
+        ("Abs. Sampling Pop.", f"{currency_symbol}{float(params['total_value']):,.2f}"),
         ("Confidence Level", str(conf_level)),
         ("Confidence Factor", str(conf_factor)),
         ("Sampling Interval", f"{currency_symbol}{float(params['interval']):,.2f}"),
@@ -128,46 +144,36 @@ def generate_pdf(df, params, amount_col, desc_col, currency_symbol):
         
     pdf.ln(10)
     
-    # --- 2. RESULTS TABLE CONFIGURATION ---
+    # --- 2. RESULTS TABLE ---
     pdf.set_font("Arial", 'B', 12)
     pdf.cell(0, 10, "2. Selected Sample Items", ln=True)
     
-    # Define Column Settings
     header_names = ["Row #", "Customer / Description", "Balance", "Audit Hit Point", "Cumulative Bal", "Note"]
     col_widths = [12, 75, 35, 40, 40, 30]
     
-    # Pass settings to the class so it can repeat them on new pages
     pdf.set_table_cols(header_names, col_widths)
-    
-    # Print Header Manually on Page 1
     pdf.print_table_header()
-    
-    # Activate the flag: Future pages will now auto-print this header
     pdf.is_table_active = True
     
-    # --- 3. PRINT ROWS ---
     pdf.set_font("Arial", size=8)
     
     for i, row in df.iterrows():
-        # Prepare Data
         row_num = str(row.get('Row_Index_1_Based', ''))
         
         desc_text = str(row.get(desc_col, ''))
         if len(desc_text) > 45: desc_text = desc_text[:42] + "..."
         
-        # Robust Conversion (Fixes the PDF Error)
         amt_val = clean_currency(row.get(amount_col, 0))
         hit_val = clean_currency(row.get('Audit_Hit', 0))
         cum_val = clean_currency(row.get('Cumulative_Balance', 0))
         note_val = str(row.get('Audit_Note', ''))
 
-        # Print Cells
         pdf.cell(col_widths[0], 8, row_num, 1, 0, 'C')
         pdf.cell(col_widths[1], 8, desc_text, 1, 0, 'L')
         pdf.cell(col_widths[2], 8, f"{amt_val:,.2f}", 1, 0, 'R')
         pdf.cell(col_widths[3], 8, f"{hit_val:,.2f}", 1, 0, 'R')
         pdf.cell(col_widths[4], 8, f"{cum_val:,.2f}", 1, 0, 'R')
-        pdf.cell(col_widths[5], 8, note_val, 1, 1, 'C') # ln=1 for new line
+        pdf.cell(col_widths[5], 8, note_val, 1, 1, 'C')
         
     return pdf.output(dest='S').encode('latin-1')
 
@@ -175,22 +181,29 @@ def perform_mus_audit(df, amount_col, interval, random_seed, tz_name):
     # Setup
     population = df.copy()
     
-    # Clean Data
+    # Clean Data using the NEW Robust Cleaner
     population[amount_col] = population[amount_col].apply(clean_currency)
+    
+    # IMPORTANT: MUS uses Absolute Value for sampling logic
+    # But we preserve the original sign for the "Balance" display
     population['Abs_Amount'] = population[amount_col].abs()
     
-    # Cumulative Calculation
+    # Calculate NET total for Control purposes (e.g. -279M)
+    net_total = population[amount_col].sum()
+    
+    # Calculate ABSOLUTE total for Sampling purposes (e.g. 375M)
+    abs_total_value = population['Abs_Amount'].sum()
+    
+    # Cumulative Calculation on ABSOLUTE amounts
     population['Cumulative_Balance'] = population['Abs_Amount'].cumsum()
     population['Previous_Cumulative'] = population['Cumulative_Balance'] - population['Abs_Amount']
     
-    total_value = population['Abs_Amount'].sum()
-    
-    if total_value == 0:
-        return None, "Error: Total value is 0.", {}
+    if abs_total_value == 0:
+        return None, "Error: Total absolute value is 0.", {}
     if interval <= 0:
         return None, "Error: Interval must be > 0.", {}
 
-    # TIMEZONE HANDLING
+    # Timezone
     try:
         local_tz = pytz.timezone(tz_name)
         run_timestamp = datetime.now(local_tz).strftime("%Y-%m-%d %H:%M:%S")
@@ -204,7 +217,7 @@ def perform_mus_audit(df, amount_col, interval, random_seed, tz_name):
     # Hit Points
     hit_points = []
     current_hit = random_start
-    while current_hit <= total_value:
+    while current_hit <= abs_total_value:
         hit_points.append(current_hit)
         current_hit += interval
         
@@ -232,6 +245,10 @@ def perform_mus_audit(df, amount_col, interval, random_seed, tz_name):
         matches_df = pd.DataFrame(selection_results)
         original_rows = df.loc[matches_df['Original_Index']].copy()
         
+        # We need to make sure the "Balance" column in the result is the CLEANED number (with negatives)
+        # otherwise it might show the original text string like "(500)"
+        original_rows[amount_col] = population.loc[matches_df['Original_Index'], amount_col]
+        
         original_rows['Cumulative_Balance'] = matches_df['Cumulative_Balance'].values
         original_rows['Audit_Hit'] = matches_df['Audit_Hit'].values
         original_rows['Audit_Note'] = matches_df['Audit_Note'].values
@@ -240,7 +257,8 @@ def perform_mus_audit(df, amount_col, interval, random_seed, tz_name):
         audit_params = {
             'timestamp': run_timestamp,
             'timezone': tz_name,
-            'total_value': total_value,
+            'total_value': abs_total_value, # The sampling population
+            'net_total': net_total,         # The control total (-279M)
             'random_seed': random_seed,
             'random_start': random_start,
             'interval': interval,
@@ -255,7 +273,6 @@ def perform_mus_audit(df, amount_col, interval, random_seed, tz_name):
 
 st.title("🛡️ Audit Assistant: Monetary Unit Sampling")
 
-# Initialize Session State
 if 'audit_result_df' not in st.session_state:
     st.session_state.audit_result_df = None
 if 'audit_params' not in st.session_state:
@@ -285,6 +302,8 @@ with st.sidebar:
     final_interval = 0.0
     target_sample_size = 0
     audit_params_display = {}
+    
+    # We must access the data to show total value, but we defer calculation until data loads
     
     if method == "Target Sample Size":
         target_sample_size = st.number_input("Items to Select", value=25, min_value=1)
@@ -319,7 +338,7 @@ with st.sidebar:
         if uploaded_file is not None:
              try:
                 uploaded_file.seek(0)
-                # Just reading to ensure valid CSV, main read happens below
+                # Just reading to ensure valid CSV
                 df_check = pd.read_csv(uploaded_file)
                 st.session_state.trigger_run = True
              except Exception as e:
@@ -350,14 +369,20 @@ if uploaded_file is not None:
                      break
              desc_col = st.selectbox("Select Description/Customer Column", all_cols, index=default_idx)
              
-        temp_clean = df[amount_col].apply(clean_currency)
-        total_val = temp_clean.abs().sum()
+        # DYNAMIC TOTAL CALCULATION (Updated for Dual Totals)
+        # Apply cleaner to get the real numeric series
+        clean_series = df[amount_col].apply(clean_currency)
+        net_total_val = clean_series.sum()
+        abs_total_val = clean_series.abs().sum()
         
         with col3:
-            st.metric("Total Population Value", f"{currency_symbol}{total_val:,.2f}")
+            # Show Net Total (Control)
+            st.metric("Net Control Total (Net)", f"{currency_symbol}{net_total_val:,.2f}")
+            # Show Absolute Total (For Sampling)
+            st.caption(f"Abs. Sampling Pop: {currency_symbol}{abs_total_val:,.2f}")
 
-        if method == "Target Sample Size" and total_val > 0:
-            final_interval = total_val / target_sample_size
+        if method == "Target Sample Size" and abs_total_val > 0:
+            final_interval = abs_total_val / target_sample_size
             st.info(f"**Interval:** {currency_symbol}{final_interval:,.2f} (Target: {target_sample_size} items)")
 
         # RUN LOGIC
@@ -366,6 +391,7 @@ if uploaded_file is not None:
                 st.error("Interval must be greater than 0.")
             else:
                 with st.spinner('Calculating...'):
+                    # Pass Timezone here
                     result_df, msg, params = perform_mus_audit(df, amount_col, final_interval, random_seed, selected_timezone)
                     params.update(audit_params_display)
                     
@@ -388,9 +414,10 @@ if uploaded_file is not None:
                 p_col1.metric("Random Seed", p['random_seed'])
                 p_col2.metric("Random Start", f"{p['random_start']:,}")
                 p_col3.metric("Interval", f"{currency_symbol}{p['interval']:,.2f}")
-                p_col4.metric("Population Total", f"{currency_symbol}{p['total_value']:,.2f}")
+                # Show both totals in the final report
+                p_col4.metric("Net Control Total", f"{currency_symbol}{p['net_total']:,.2f}")
                 
-                st.caption(f"Time Zone: {p.get('timezone', 'UTC')} | Run Time: {p.get('timestamp')}")
+                st.caption(f"Absolute Sampling Population: {currency_symbol}{p['total_value']:,.2f} | Time Zone: {p.get('timezone', 'UTC')}")
                 st.divider()
                 
                 st.subheader("✅ Selected Sample Items")
