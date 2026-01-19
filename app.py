@@ -30,7 +30,6 @@ def clean_currency(x):
         s = s[1:-1] # Remove brackets
 
     # 2. Remove standard currency symbols and separators
-    # Keep only digits, dots, and the minus sign
     s_clean = re.sub(r'[R$£€¥,\s]', '', s)
     
     # 3. Handle Trailing Negatives (e.g., "500-")
@@ -39,7 +38,6 @@ def clean_currency(x):
         
     try:
         val = float(s_clean)
-        # Apply the bracket negative logic
         if is_bracket_negative:
             val = -abs(val)
         return val
@@ -117,11 +115,9 @@ def generate_pdf(df, params, amount_col, desc_col, currency_symbol):
     pdf.cell(w_param, h_line, "Parameter", 1, 0, 'L', True)
     pdf.cell(w_result, h_line, "Result", 1, 1, 'L', True)
     
-    # Crash-proof retrieval
+    # Retrieval
     conf_level = params.get('conf_level', 'N/A')
     conf_factor = params.get('conf_factor', 'N/A')
-    
-    # We display the Net Total (with sign) and the Sampling Total (Absolute)
     net_total = params.get('net_total', 0.0)
     total_val = params.get('total_value', 0.0)
     interval = params.get('interval', 0.0)
@@ -150,9 +146,18 @@ def generate_pdf(df, params, amount_col, desc_col, currency_symbol):
     pdf.set_font("Arial", 'B', 12)
     pdf.cell(0, 10, "2. Selected Sample Items", ln=True)
     
-    # Column Headers - Cumulative is labelled "Abs" to explain why it increases
-    header_names = ["Row #", "Customer / Description", "Balance", "Audit Hit Point", "Cumulative (Abs)", "Note"]
-    col_widths = [12, 75, 35, 40, 40, 30]
+    # NEW HEADER STRUCTURE: Including Net Run Bal
+    # Total width available ~277mm
+    # [12] Row
+    # [60] Desc
+    # [30] Balance
+    # [35] Run. Bal (Net)  <-- NEW
+    # [35] Samp. Index (Abs)
+    # [35] Audit Hit
+    # [60] Note
+    
+    header_names = ["Row #", "Customer / Description", "Balance", "Run. Bal (Net)", "Samp. Index (Abs)", "Audit Hit", "Note"]
+    col_widths = [12, 60, 30, 35, 35, 35, 60]
     
     pdf.set_table_cols(header_names, col_widths)
     pdf.print_table_header()
@@ -164,20 +169,21 @@ def generate_pdf(df, params, amount_col, desc_col, currency_symbol):
         row_num = str(row.get('Row_Index_1_Based', ''))
         
         desc_text = str(row.get(desc_col, ''))
-        if len(desc_text) > 45: desc_text = desc_text[:42] + "..."
+        if len(desc_text) > 35: desc_text = desc_text[:32] + "..."
         
-        # Clean values for display
         amt_val = clean_currency(row.get(amount_col, 0))
+        run_bal_val = clean_currency(row.get('Running_Net_Balance', 0))
+        cum_val = clean_currency(row.get('Cumulative_Balance', 0)) # Absolute
         hit_val = clean_currency(row.get('Audit_Hit', 0))
-        cum_val = clean_currency(row.get('Cumulative_Balance', 0))
         note_val = str(row.get('Audit_Note', ''))
 
         pdf.cell(col_widths[0], 8, row_num, 1, 0, 'C')
         pdf.cell(col_widths[1], 8, desc_text, 1, 0, 'L')
         pdf.cell(col_widths[2], 8, f"{amt_val:,.2f}", 1, 0, 'R')
-        pdf.cell(col_widths[3], 8, f"{hit_val:,.2f}", 1, 0, 'R')
-        pdf.cell(col_widths[4], 8, f"{cum_val:,.2f}", 1, 0, 'R')
-        pdf.cell(col_widths[5], 8, note_val, 1, 1, 'C')
+        pdf.cell(col_widths[3], 8, f"{run_bal_val:,.2f}", 1, 0, 'R') # Net
+        pdf.cell(col_widths[4], 8, f"{cum_val:,.2f}", 1, 0, 'R') # Abs
+        pdf.cell(col_widths[5], 8, f"{hit_val:,.2f}", 1, 0, 'R')
+        pdf.cell(col_widths[6], 8, note_val, 1, 1, 'C')
         
     return pdf.output(dest='S').encode('latin-1')
 
@@ -185,19 +191,19 @@ def perform_mus_audit(df, amount_col, interval, random_seed, tz_name):
     # Setup
     population = df.copy()
     
-    # Clean Data using the NEW Robust Cleaner
+    # Clean Data
     population[amount_col] = population[amount_col].apply(clean_currency)
     
-    # IMPORTANT: MUS uses Absolute Value for sampling logic
+    # 1. ACTUAL NET RUNNING BALANCE (Negative accumulation)
+    population['Running_Net_Balance'] = population[amount_col].cumsum()
+    
+    # 2. SAMPLING ABSOLUTE LOGIC
     population['Abs_Amount'] = population[amount_col].abs()
-    
-    # Totals
-    net_total = population[amount_col].sum()
-    abs_total_value = population['Abs_Amount'].sum()
-    
-    # Cumulative Calculation on ABSOLUTE amounts
     population['Cumulative_Balance'] = population['Abs_Amount'].cumsum()
     population['Previous_Cumulative'] = population['Cumulative_Balance'] - population['Abs_Amount']
+    
+    net_total = population[amount_col].sum()
+    abs_total_value = population['Abs_Amount'].sum()
     
     if abs_total_value == 0:
         return None, "Error: Total absolute value is 0.", {}
@@ -222,7 +228,7 @@ def perform_mus_audit(df, amount_col, interval, random_seed, tz_name):
         hit_points.append(current_hit)
         current_hit += interval
         
-    # Selection Logic
+    # Selection
     selection_results = []
     hit_idx = 0
     num_hits = len(hit_points)
@@ -237,7 +243,8 @@ def perform_mus_audit(df, amount_col, interval, random_seed, tz_name):
                 selection_results.append({
                     'Original_Index': index,
                     'Audit_Hit': current_target,
-                    'Cumulative_Balance': high,
+                    'Cumulative_Balance': high, # The ABSOLUTE Sampling Index
+                    'Running_Net_Balance': row['Running_Net_Balance'], # The NET Book Balance
                     'Audit_Note': 'High Value' if row['Abs_Amount'] >= interval else 'Sampled'
                 })
             hit_idx += 1
@@ -246,9 +253,10 @@ def perform_mus_audit(df, amount_col, interval, random_seed, tz_name):
         matches_df = pd.DataFrame(selection_results)
         original_rows = df.loc[matches_df['Original_Index']].copy()
         
-        # Ensure 'Balance' column is the cleaned number (to preserve sign)
+        # Ensure Cleaned Amount in final table
         original_rows[amount_col] = population.loc[matches_df['Original_Index'], amount_col]
         
+        original_rows['Running_Net_Balance'] = matches_df['Running_Net_Balance'].values
         original_rows['Cumulative_Balance'] = matches_df['Cumulative_Balance'].values
         original_rows['Audit_Hit'] = matches_df['Audit_Hit'].values
         original_rows['Audit_Note'] = matches_df['Audit_Note'].values
@@ -366,7 +374,7 @@ if uploaded_file is not None:
                      break
              desc_col = st.selectbox("Select Description/Customer Column", all_cols, index=default_idx)
              
-        # DYNAMIC TOTAL CALCULATION (Using Cleaner)
+        # DYNAMIC TOTALS
         clean_series = df[amount_col].apply(clean_currency)
         net_total_val = clean_series.sum()
         abs_total_val = clean_series.abs().sum()
@@ -417,8 +425,11 @@ if uploaded_file is not None:
                 display_cols = ['Row_Index_1_Based'] + [c for c in res_df.columns if c != 'Row_Index_1_Based']
                 display_df = res_df[display_cols].copy()
                 
+                # Rounding
                 display_df['Audit_Hit'] = display_df['Audit_Hit'].round(2)
+                display_df['Running_Net_Balance'] = display_df['Running_Net_Balance'].round(2)
                 display_df['Cumulative_Balance'] = display_df['Cumulative_Balance'].round(2)
+                
                 display_df.set_index('Row_Index_1_Based', inplace=True)
                 
                 st.dataframe(display_df)
