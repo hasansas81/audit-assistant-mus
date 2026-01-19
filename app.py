@@ -424,4 +424,34 @@ if uploaded_file is not None:
                 
                 st.dataframe(display_df)
                 
-                st.subheader("💾 Export Work
+                st.subheader("💾 Export Workpapers")
+                e_col1, e_col2 = st.columns(2)
+                
+                csv = display_df.to_csv().encode('utf-8')
+                with e_col1:
+                    st.download_button(
+                        label="📥 Download as CSV",
+                        data=csv,
+                        file_name='audit_sample.csv',
+                        mime='text/csv',
+                    )
+                
+                try:
+                    pdf_bytes = generate_pdf(res_df, p, amount_col, desc_col, currency_symbol)
+                    with e_col2:
+                        st.download_button(
+                            label="📄 Download as PDF",
+                            data=pdf_bytes,
+                            file_name='audit_working_paper.pdf',
+                            mime='application/pdf'
+                        )
+                except Exception as e:
+                    st.error(f"PDF Generation Error: {e}")
+            else:
+                st.warning(st.session_state.audit_msg)
+
+    except Exception as e:
+        st.error(f"Error processing file: {e}")
+else:
+    st.info("👈 Upload your client's CSV file in the sidebar to start.")
+
