@@ -53,12 +53,9 @@ class AuditPDF(FPDF):
         self.col_names = []
 
     def header(self):
-        # 1. WATERMARK
-        self.set_font('Arial', 'B', 30)
-        self.set_text_color(240, 240, 240) # Very Light Grey
-        self.text(60, 25, "Prepared by Audit Assistant") 
+        # --- WATERMARK REMOVED ---
         
-        # 2. Main Title (Page 1 only)
+        # 1. Main Title (Page 1 only)
         if self.page_no() == 1:
             self.set_y(10)
             self.set_font("Arial", 'B', 16)
@@ -68,7 +65,7 @@ class AuditPDF(FPDF):
         else:
             self.set_y(20)
 
-        # 3. REPEATING TABLE HEADER
+        # 2. REPEATING TABLE HEADER
         if self.page_no() > 1 and self.is_table_active:
             self.print_table_header()
 
@@ -121,13 +118,14 @@ def generate_pdf(df, params, amount_col, desc_col, currency_symbol):
     net_total = params.get('net_total', 0.0)
     total_val = params.get('total_value', 0.0)
     interval = params.get('interval', 0.0)
+    sample_total = params.get('sample_net_total', 0.0) # NEW
     
     param_rows = [
         ("Execution Time", str(params.get('timestamp', 'N/A'))),
         ("Time Zone", str(params.get('timezone', 'UTC'))),
         ("Random Seed", str(params.get('random_seed', 'N/A'))),
         ("Net Control Total", f"{currency_symbol}{float(net_total):,.2f}"),
-        ("Abs. Sampling Pop.", f"{currency_symbol}{float(total_val):,.2f}"),
+        ("Net Sample Total", f"{currency_symbol}{float(sample_total):,.2f}"), # NEW LINE
         ("Confidence Level", str(conf_level)),
         ("Confidence Factor", str(conf_factor)),
         ("Sampling Interval", f"{currency_symbol}{float(interval):,.2f}"),
@@ -146,18 +144,18 @@ def generate_pdf(df, params, amount_col, desc_col, currency_symbol):
     pdf.set_font("Arial", 'B', 12)
     pdf.cell(0, 10, "2. Selected Sample Items", ln=True)
     
-    # NEW HEADER STRUCTURE: Including Net Run Bal
-    # Total width available ~277mm
-    # [12] Row
+    # NEW HEADER STRUCTURE: Including Item #
+    # [10] No.
+    # [12] CSV Row
     # [60] Desc
     # [30] Balance
-    # [35] Run. Bal (Net)  <-- NEW
-    # [35] Samp. Index (Abs)
-    # [35] Audit Hit
+    # [35] Run. Bal
+    # [35] Samp. Index
+    # [35] Hit
     # [60] Note
     
-    header_names = ["Row #", "Customer / Description", "Balance", "Run. Bal (Net)", "Samp. Index (Abs)", "Audit Hit", "Note"]
-    col_widths = [12, 60, 30, 35, 35, 35, 60]
+    header_names = ["No.", "Row", "Customer / Description", "Balance", "Run. Bal (Net)", "Samp. Index", "Audit Hit", "Note"]
+    col_widths = [10, 12, 60, 30, 35, 35, 35, 60]
     
     pdf.set_table_cols(header_names, col_widths)
     pdf.print_table_header()
@@ -166,6 +164,7 @@ def generate_pdf(df, params, amount_col, desc_col, currency_symbol):
     pdf.set_font("Arial", size=8)
     
     for i, row in df.iterrows():
+        item_num = str(row.get('Item_No', '')) # NEW: 1, 2, 3
         row_num = str(row.get('Row_Index_1_Based', ''))
         
         desc_text = str(row.get(desc_col, ''))
@@ -173,17 +172,18 @@ def generate_pdf(df, params, amount_col, desc_col, currency_symbol):
         
         amt_val = clean_currency(row.get(amount_col, 0))
         run_bal_val = clean_currency(row.get('Running_Net_Balance', 0))
-        cum_val = clean_currency(row.get('Cumulative_Balance', 0)) # Absolute
+        cum_val = clean_currency(row.get('Cumulative_Balance', 0))
         hit_val = clean_currency(row.get('Audit_Hit', 0))
         note_val = str(row.get('Audit_Note', ''))
 
-        pdf.cell(col_widths[0], 8, row_num, 1, 0, 'C')
-        pdf.cell(col_widths[1], 8, desc_text, 1, 0, 'L')
-        pdf.cell(col_widths[2], 8, f"{amt_val:,.2f}", 1, 0, 'R')
-        pdf.cell(col_widths[3], 8, f"{run_bal_val:,.2f}", 1, 0, 'R') # Net
-        pdf.cell(col_widths[4], 8, f"{cum_val:,.2f}", 1, 0, 'R') # Abs
-        pdf.cell(col_widths[5], 8, f"{hit_val:,.2f}", 1, 0, 'R')
-        pdf.cell(col_widths[6], 8, note_val, 1, 1, 'C')
+        pdf.cell(col_widths[0], 8, item_num, 1, 0, 'C') # New No. Column
+        pdf.cell(col_widths[1], 8, row_num, 1, 0, 'C')
+        pdf.cell(col_widths[2], 8, desc_text, 1, 0, 'L')
+        pdf.cell(col_widths[3], 8, f"{amt_val:,.2f}", 1, 0, 'R')
+        pdf.cell(col_widths[4], 8, f"{run_bal_val:,.2f}", 1, 0, 'R')
+        pdf.cell(col_widths[5], 8, f"{cum_val:,.2f}", 1, 0, 'R')
+        pdf.cell(col_widths[6], 8, f"{hit_val:,.2f}", 1, 0, 'R')
+        pdf.cell(col_widths[7], 8, note_val, 1, 1, 'C')
         
     return pdf.output(dest='S').encode('latin-1')
 
@@ -194,7 +194,7 @@ def perform_mus_audit(df, amount_col, interval, random_seed, tz_name):
     # Clean Data
     population[amount_col] = population[amount_col].apply(clean_currency)
     
-    # 1. ACTUAL NET RUNNING BALANCE (Negative accumulation)
+    # 1. ACTUAL NET RUNNING BALANCE
     population['Running_Net_Balance'] = population[amount_col].cumsum()
     
     # 2. SAMPLING ABSOLUTE LOGIC
@@ -243,8 +243,8 @@ def perform_mus_audit(df, amount_col, interval, random_seed, tz_name):
                 selection_results.append({
                     'Original_Index': index,
                     'Audit_Hit': current_target,
-                    'Cumulative_Balance': high, # The ABSOLUTE Sampling Index
-                    'Running_Net_Balance': row['Running_Net_Balance'], # The NET Book Balance
+                    'Cumulative_Balance': high, 
+                    'Running_Net_Balance': row['Running_Net_Balance'], 
                     'Audit_Note': 'High Value' if row['Abs_Amount'] >= interval else 'Sampled'
                 })
             hit_idx += 1
@@ -253,20 +253,28 @@ def perform_mus_audit(df, amount_col, interval, random_seed, tz_name):
         matches_df = pd.DataFrame(selection_results)
         original_rows = df.loc[matches_df['Original_Index']].copy()
         
-        # Ensure Cleaned Amount in final table
+        # Ensure Cleaned Amount
         original_rows[amount_col] = population.loc[matches_df['Original_Index'], amount_col]
         
+        # Add Columns
         original_rows['Running_Net_Balance'] = matches_df['Running_Net_Balance'].values
         original_rows['Cumulative_Balance'] = matches_df['Cumulative_Balance'].values
         original_rows['Audit_Hit'] = matches_df['Audit_Hit'].values
         original_rows['Audit_Note'] = matches_df['Audit_Note'].values
         original_rows['Row_Index_1_Based'] = matches_df['Original_Index'].values + 1
         
+        # NEW: Sample Number (1, 2, 3...)
+        original_rows['Item_No'] = range(1, len(original_rows) + 1)
+        
+        # NEW: Calculate Sample Total
+        sample_net_total = original_rows[amount_col].sum()
+        
         audit_params = {
             'timestamp': run_timestamp,
             'timezone': tz_name,
             'total_value': abs_total_value,
             'net_total': net_total, 
+            'sample_net_total': sample_net_total, # NEW
             'random_seed': random_seed,
             'random_start': random_start,
             'interval': interval,
@@ -413,16 +421,18 @@ if uploaded_file is not None:
                 st.subheader("📋 Audit Parameters Report")
                 p_col1, p_col2, p_col3, p_col4 = st.columns(4)
                 
-                p_col1.metric("Random Seed", p.get('random_seed', 0))
-                p_col2.metric("Random Start", f"{p.get('random_start', 0):,}")
-                p_col3.metric("Interval", f"{currency_symbol}{p.get('interval', 0):,.2f}")
+                p_col1.metric("Items Selected", p.get('count', 0)) # Swapped positions for visibility
+                p_col2.metric("Interval", f"{currency_symbol}{p.get('interval', 0):,.2f}")
+                p_col3.metric("Net Sample Total", f"{currency_symbol}{p.get('sample_net_total', 0):,.2f}")
                 p_col4.metric("Net Control Total", f"{currency_symbol}{p.get('net_total', 0):,.2f}")
                 
-                st.caption(f"Absolute Sampling Population: {currency_symbol}{p.get('total_value', 0):,.2f} | Time Zone: {p.get('timezone', 'UTC')}")
+                st.caption(f"Absolute Sampling Pop: {currency_symbol}{p.get('total_value', 0):,.2f} | Seed: {p.get('random_seed')} | Start: {p.get('random_start'):,}")
                 st.divider()
                 
                 st.subheader("✅ Selected Sample Items")
-                display_cols = ['Row_Index_1_Based'] + [c for c in res_df.columns if c != 'Row_Index_1_Based']
+                
+                # Reorder to show Item No first
+                display_cols = ['Item_No', 'Row_Index_1_Based'] + [c for c in res_df.columns if c not in ['Item_No', 'Row_Index_1_Based']]
                 display_df = res_df[display_cols].copy()
                 
                 # Rounding
@@ -430,7 +440,7 @@ if uploaded_file is not None:
                 display_df['Running_Net_Balance'] = display_df['Running_Net_Balance'].round(2)
                 display_df['Cumulative_Balance'] = display_df['Cumulative_Balance'].round(2)
                 
-                display_df.set_index('Row_Index_1_Based', inplace=True)
+                display_df.set_index('Item_No', inplace=True)
                 
                 st.dataframe(display_df)
                 
