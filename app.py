@@ -15,7 +15,7 @@ if 'logged_in' not in st.session_state:
 if 'usage_count' not in st.session_state:
     st.session_state.usage_count = 0
 
-# CREDENTIALS (Simple Hardcoded for MVP)
+# CREDENTIALS
 VALID_USER = "audit_user"
 VALID_PASS = "secure_audit_2026"
 
@@ -349,6 +349,13 @@ else:
             st.session_state.audit_params = {}
             st.session_state.audit_msg = ""
             st.session_state.trigger_run = False
+            st.rerun()
+
+        # LOGOUT BUTTON
+        st.markdown("---")
+        if st.button("🚪 Log Out"):
+            st.session_state.logged_in = False
+            st.session_state.audit_result_df = None # Clear data for security
             st.rerun()
 
         st.markdown("---")
