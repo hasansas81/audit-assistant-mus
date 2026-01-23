@@ -11,11 +11,11 @@ import os
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="Audit Assistant - MUS Tool", layout="wide", initial_sidebar_state="expanded")
 
-# --- 0. PERSISTENT STORAGE (THE MINI-DATABASE) ---
+# --- 0. PERSISTENT STORAGE ---
 DB_FILE = "usage_db.json"
+DAILY_LIMIT = 5  # <--- STRICT LIMIT SETTING
 
 def load_usage_data():
-    """Loads usage counts from a local JSON file."""
     if not os.path.exists(DB_FILE):
         return {}
     try:
@@ -25,13 +25,11 @@ def load_usage_data():
         return {}
 
 def save_usage_data(data):
-    """Saves usage counts to a local JSON file."""
     with open(DB_FILE, "w") as f:
         json.dump(data, f)
 
 def get_user_usage(username):
     data = load_usage_data()
-    # If user doesn't exist, start them at 0
     return data.get(username, 0)
 
 def increment_user_usage(username):
@@ -74,24 +72,18 @@ def login_screen():
 # --- 1. HELPER FUNCTIONS ---
 
 def clean_currency(x):
-    """Advanced Cleaner: Handles accounting formats like (10,000.00) or 10000-"""
     if isinstance(x, (int, float)):
         return float(x)
-    
     s = str(x).strip()
     if not s or s.lower() == 'nan':
         return 0.0
-    
     is_bracket_negative = False
     if s.startswith('(') and s.endswith(')'):
         is_bracket_negative = True
         s = s[1:-1]
-
     s_clean = re.sub(r'[R$£€¥,\s]', '', s)
-    
     if s_clean.endswith('-'):
         s_clean = '-' + s_clean[:-1]
-        
     try:
         val = float(s_clean)
         if is_bracket_negative:
@@ -324,11 +316,11 @@ else:
     with st.sidebar:
         user = st.session_state.username
         
-        # Load Usage from "Mini-DB"
+        # Load Usage
         current_usage = get_user_usage(user)
         
         st.write(f"Logged in as: **{user}**")
-        st.info(f"Usage: {current_usage} / 5 Free Runs")
+        st.info(f"Usage: {current_usage} / {DAILY_LIMIT} Free Runs")
         
         st.header("1. Upload Data")
         uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
@@ -370,19 +362,21 @@ else:
         st.header("4. Execution")
         random_seed = st.number_input("Random Seed", value=12345, step=1)
         
-        # RUN BUTTON
+        # RUN BUTTON (WITH GATEKEEPER CHECK)
         if st.button("Run Sampling"):
-            # Update Persistent Usage
-            new_count = increment_user_usage(user)
-            st.session_state.usage_count = new_count # Update session to match DB
-            
-            if uploaded_file is not None:
-                try:
-                    uploaded_file.seek(0)
-                    df_check = pd.read_csv(uploaded_file)
-                    st.session_state.trigger_run = True
-                except Exception as e:
-                    st.error(f"Error: {e}")
+            if current_usage >= DAILY_LIMIT:
+                st.error(f"❌ Daily limit reached ({DAILY_LIMIT}/{DAILY_LIMIT}). Please upgrade to Pro.")
+            else:
+                # Only run if under limit
+                increment_user_usage(user)
+                if uploaded_file is not None:
+                    try:
+                        uploaded_file.seek(0)
+                        df_check = pd.read_csv(uploaded_file)
+                        st.session_state.trigger_run = True
+                        st.rerun() # Refresh to show new count
+                    except Exception as e:
+                        st.error(f"Error: {e}")
                     
         # RESET BUTTON
         if st.button("🔄 Start New / Clear"):
