@@ -5,15 +5,47 @@ from datetime import datetime
 import pytz
 from fpdf import FPDF
 import re
+import json
+import os
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="Audit Assistant - MUS Tool", layout="wide", initial_sidebar_state="expanded")
 
-# --- 0. AUTHENTICATION & SESSION SETUP ---
+# --- 0. PERSISTENT STORAGE (THE MINI-DATABASE) ---
+DB_FILE = "usage_db.json"
+
+def load_usage_data():
+    """Loads usage counts from a local JSON file."""
+    if not os.path.exists(DB_FILE):
+        return {}
+    try:
+        with open(DB_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return {}
+
+def save_usage_data(data):
+    """Saves usage counts to a local JSON file."""
+    with open(DB_FILE, "w") as f:
+        json.dump(data, f)
+
+def get_user_usage(username):
+    data = load_usage_data()
+    # If user doesn't exist, start them at 0
+    return data.get(username, 0)
+
+def increment_user_usage(username):
+    data = load_usage_data()
+    current = data.get(username, 0)
+    data[username] = current + 1
+    save_usage_data(data)
+    return data[username]
+
+# --- AUTHENTICATION ---
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
-if 'usage_count' not in st.session_state:
-    st.session_state.usage_count = 0
+if 'username' not in st.session_state:
+    st.session_state.username = ""
 
 # CREDENTIALS
 VALID_USER = "audit_user"
@@ -31,6 +63,7 @@ def login_screen():
         if st.button("Log In"):
             if user == VALID_USER and password == VALID_PASS:
                 st.session_state.logged_in = True
+                st.session_state.username = user
                 st.rerun()
             else:
                 st.error("Invalid Username or Password")
@@ -289,8 +322,13 @@ else:
 
     # SIDEBAR
     with st.sidebar:
-        st.write(f"Logged in as: **{VALID_USER}**")
-        st.info(f"Daily Usage: {st.session_state.usage_count} / 5 Free Runs")
+        user = st.session_state.username
+        
+        # Load Usage from "Mini-DB"
+        current_usage = get_user_usage(user)
+        
+        st.write(f"Logged in as: **{user}**")
+        st.info(f"Usage: {current_usage} / 5 Free Runs")
         
         st.header("1. Upload Data")
         uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
@@ -334,7 +372,10 @@ else:
         
         # RUN BUTTON
         if st.button("Run Sampling"):
-            st.session_state.usage_count += 1
+            # Update Persistent Usage
+            new_count = increment_user_usage(user)
+            st.session_state.usage_count = new_count # Update session to match DB
+            
             if uploaded_file is not None:
                 try:
                     uploaded_file.seek(0)
@@ -355,15 +396,16 @@ else:
         st.markdown("---")
         if st.button("🚪 Log Out"):
             st.session_state.logged_in = False
-            st.session_state.audit_result_df = None # Clear data for security
+            st.session_state.username = ""
+            st.session_state.audit_result_df = None
             st.rerun()
 
         st.markdown("---")
         with st.expander("🔒 Pro Features (Locked)"):
-            st.caption("• Cloud Storage (Save Workpapers)")
+            st.caption("• Unlimited Sampling Runs")
+            st.caption("• Large File Support (>50k rows)")
+            st.caption("• Cloud Storage")
             st.caption("• Team Collaboration")
-            st.caption("• OCR Invoice Scanning")
-            st.caption("• API Access")
             st.button("Upgrade to Pro", disabled=True)
 
     # MAIN AREA
