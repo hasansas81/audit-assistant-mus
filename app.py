@@ -53,8 +53,6 @@ class AuditPDF(FPDF):
         self.col_names = []
 
     def header(self):
-        # --- WATERMARK REMOVED ---
-        
         # 1. Main Title (Page 1 only)
         if self.page_no() == 1:
             self.set_y(10)
@@ -118,14 +116,14 @@ def generate_pdf(df, params, amount_col, desc_col, currency_symbol):
     net_total = params.get('net_total', 0.0)
     total_val = params.get('total_value', 0.0)
     interval = params.get('interval', 0.0)
-    sample_total = params.get('sample_net_total', 0.0) # NEW
+    sample_total = params.get('sample_net_total', 0.0)
     
     param_rows = [
         ("Execution Time", str(params.get('timestamp', 'N/A'))),
         ("Time Zone", str(params.get('timezone', 'UTC'))),
         ("Random Seed", str(params.get('random_seed', 'N/A'))),
         ("Net Control Total", f"{currency_symbol}{float(net_total):,.2f}"),
-        ("Net Sample Total", f"{currency_symbol}{float(sample_total):,.2f}"), # NEW LINE
+        ("Net Sample Total", f"{currency_symbol}{float(sample_total):,.2f}"),
         ("Confidence Level", str(conf_level)),
         ("Confidence Factor", str(conf_factor)),
         ("Sampling Interval", f"{currency_symbol}{float(interval):,.2f}"),
@@ -144,16 +142,6 @@ def generate_pdf(df, params, amount_col, desc_col, currency_symbol):
     pdf.set_font("Arial", 'B', 12)
     pdf.cell(0, 10, "2. Selected Sample Items", ln=True)
     
-    # NEW HEADER STRUCTURE: Including Item #
-    # [10] No.
-    # [12] CSV Row
-    # [60] Desc
-    # [30] Balance
-    # [35] Run. Bal
-    # [35] Samp. Index
-    # [35] Hit
-    # [60] Note
-    
     header_names = ["No.", "Row", "Customer / Description", "Balance", "Run. Bal (Net)", "Samp. Index", "Audit Hit", "Note"]
     col_widths = [10, 12, 60, 30, 35, 35, 35, 60]
     
@@ -164,7 +152,7 @@ def generate_pdf(df, params, amount_col, desc_col, currency_symbol):
     pdf.set_font("Arial", size=8)
     
     for i, row in df.iterrows():
-        item_num = str(row.get('Item_No', '')) # NEW: 1, 2, 3
+        item_num = str(row.get('Item_No', '')) 
         row_num = str(row.get('Row_Index_1_Based', ''))
         
         desc_text = str(row.get(desc_col, ''))
@@ -176,7 +164,7 @@ def generate_pdf(df, params, amount_col, desc_col, currency_symbol):
         hit_val = clean_currency(row.get('Audit_Hit', 0))
         note_val = str(row.get('Audit_Note', ''))
 
-        pdf.cell(col_widths[0], 8, item_num, 1, 0, 'C') # New No. Column
+        pdf.cell(col_widths[0], 8, item_num, 1, 0, 'C')
         pdf.cell(col_widths[1], 8, row_num, 1, 0, 'C')
         pdf.cell(col_widths[2], 8, desc_text, 1, 0, 'L')
         pdf.cell(col_widths[3], 8, f"{amt_val:,.2f}", 1, 0, 'R')
@@ -274,7 +262,7 @@ def perform_mus_audit(df, amount_col, interval, random_seed, tz_name):
             'timezone': tz_name,
             'total_value': abs_total_value,
             'net_total': net_total, 
-            'sample_net_total': sample_net_total, # NEW
+            'sample_net_total': sample_net_total, 
             'random_seed': random_seed,
             'random_start': random_start,
             'interval': interval,
@@ -348,6 +336,7 @@ with st.sidebar:
     st.header("4. Execution")
     random_seed = st.number_input("Random Seed", value=12345, step=1)
     
+    # RUN BUTTON
     if st.button("Run Sampling"):
         if uploaded_file is not None:
              try:
@@ -356,6 +345,14 @@ with st.sidebar:
                 st.session_state.trigger_run = True
              except Exception as e:
                 st.error(f"Error: {e}")
+                
+    # NEW RESET BUTTON
+    if st.button("🔄 Start New / Clear"):
+        st.session_state.audit_result_df = None
+        st.session_state.audit_params = {}
+        st.session_state.audit_msg = ""
+        st.session_state.trigger_run = False
+        st.rerun()
 
 # Main Area
 if uploaded_file is not None:
@@ -421,7 +418,7 @@ if uploaded_file is not None:
                 st.subheader("📋 Audit Parameters Report")
                 p_col1, p_col2, p_col3, p_col4 = st.columns(4)
                 
-                p_col1.metric("Items Selected", p.get('count', 0)) # Swapped positions for visibility
+                p_col1.metric("Items Selected", p.get('count', 0)) 
                 p_col2.metric("Interval", f"{currency_symbol}{p.get('interval', 0):,.2f}")
                 p_col3.metric("Net Sample Total", f"{currency_symbol}{p.get('sample_net_total', 0):,.2f}")
                 p_col4.metric("Net Control Total", f"{currency_symbol}{p.get('net_total', 0):,.2f}")
@@ -474,3 +471,4 @@ if uploaded_file is not None:
         st.error(f"Error processing file: {e}")
 else:
     st.info("👈 Upload your client's CSV file in the sidebar to start.")
+    st.warning("⚠️ **Pre-Sampling Caution:** Ensure that individually significant (material) and unusual items have been removed for specific testing. This tool is designed for the *remaining* sampling population.")
