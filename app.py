@@ -11,63 +11,152 @@ import os
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="Audit Assistant - MUS Tool", layout="wide", initial_sidebar_state="expanded")
 
-# --- 0. PERSISTENT STORAGE ---
-DB_FILE = "usage_db.json"
-DAILY_LIMIT = 5  # <--- STRICT LIMIT SETTING
+# --- 0. HYBRID DATABASE SETUP ---
+# This logic checks if Supabase secrets exist. If not, it falls back to a local file.
 
-def load_usage_data():
-    if not os.path.exists(DB_FILE):
-        return {}
+USE_SUPABASE = False
+try:
+    from supabase import create_client, Client
+    if "supabase" in st.secrets:
+        USE_SUPABASE = True
+except:
+    USE_SUPABASE = False
+
+DAILY_LIMIT = 5
+LOCAL_DB_FILE = "usage_db.json"
+
+# --- DATABASE FUNCTIONS (ROBUST) ---
+
+if USE_SUPABASE:
+    @st.cache_resource
+    def init_supabase():
+        url = st.secrets["supabase"]["url"]
+        key = st.secrets["supabase"]["key"]
+        return create_client(url, key)
+    
     try:
-        with open(DB_FILE, "r") as f:
-            return json.load(f)
+        supabase = init_supabase()
     except:
-        return {}
+        USE_SUPABASE = False # Fallback if connection fails
 
-def save_usage_data(data):
-    with open(DB_FILE, "w") as f:
-        json.dump(data, f)
+def get_usage_count(email):
+    """Gets usage from Supabase OR Local File depending on config."""
+    if USE_SUPABASE:
+        try:
+            response = supabase.table("user_usage").select("*").eq("user_email", email).execute()
+            if response.data:
+                return response.data[0]["usage_count"]
+            else:
+                supabase.table("user_usage").insert({"user_email": email, "usage_count": 0}).execute()
+                return 0
+        except:
+            return 999 # Fail safe allow if DB errors
+    else:
+        # Local JSON Logic
+        if not os.path.exists(LOCAL_DB_FILE):
+            return 0
+        try:
+            with open(LOCAL_DB_FILE, "r") as f:
+                data = json.load(f)
+            return data.get(email, 0)
+        except:
+            return 0
 
-def get_user_usage(username):
-    data = load_usage_data()
-    return data.get(username, 0)
+def increment_usage(email):
+    """Increments usage in Supabase OR Local File."""
+    if USE_SUPABASE:
+        try:
+            current = get_usage_count(email)
+            new_count = current + 1
+            supabase.table("user_usage").update({"usage_count": new_count}).eq("user_email", email).execute()
+            return new_count
+        except:
+            return 0
+    else:
+        # Local JSON Logic
+        data = {}
+        if os.path.exists(LOCAL_DB_FILE):
+            try:
+                with open(LOCAL_DB_FILE, "r") as f:
+                    data = json.load(f)
+            except:
+                data = {}
+        
+        current = data.get(email, 0)
+        data[email] = current + 1
+        
+        with open(LOCAL_DB_FILE, "w") as f:
+            json.dump(data, f)
+        return data[email]
 
-def increment_user_usage(username):
-    data = load_usage_data()
-    current = data.get(username, 0)
-    data[username] = current + 1
-    save_usage_data(data)
-    return data[username]
+def handle_login(email, password):
+    """Handles Login for both modes."""
+    if USE_SUPABASE:
+        try:
+            response = supabase.auth.sign_in_with_password({"email": email, "password": password})
+            if response.user:
+                return True, response.user.email
+        except:
+            return False, None
+    else:
+        # Local "Dev Mode" Login
+        if email == "admin" and password == "admin":
+            return True, "admin"
+        return False, None
 
-# --- AUTHENTICATION ---
+def handle_signup(email, password):
+    """Handles Signup for Supabase only."""
+    if USE_SUPABASE:
+        try:
+            response = supabase.auth.sign_up({"email": email, "password": password})
+            if response.user:
+                # Init usage record
+                supabase.table("user_usage").insert({"user_email": email, "usage_count": 0}).execute()
+                return True
+        except:
+            return False
+    return False
+
+# --- AUTH STATE ---
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
-if 'username' not in st.session_state:
-    st.session_state.username = ""
-
-# CREDENTIALS
-VALID_USER = "audit_user"
-VALID_PASS = "secure_audit_2026"
+if 'user_email' not in st.session_state:
+    st.session_state.user_email = ""
 
 def login_screen():
     st.title("🔐 Audit Assistant Login")
     
+    if not USE_SUPABASE:
+        st.warning("⚠️ Running in Offline Mode (No Database Connected). Use User: `admin` Pass: `admin`")
+
+    tab1, tab2 = st.tabs(["Log In", "Sign Up"])
+    
     col1, col2, col3 = st.columns([1, 2, 1])
+    
     with col2:
-        st.info("Welcome to the Audit Assistant MVP. Please log in to access the MUS Tool.")
-        user = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        
-        if st.button("Log In"):
-            if user == VALID_USER and password == VALID_PASS:
-                st.session_state.logged_in = True
-                st.session_state.username = user
-                st.rerun()
+        with tab1:
+            email = st.text_input("Email", key="login_email")
+            password = st.text_input("Password", type="password", key="login_pass")
+            if st.button("Log In"):
+                success, user = handle_login(email, password)
+                if success:
+                    st.session_state.logged_in = True
+                    st.session_state.user_email = user
+                    st.rerun()
+                else:
+                    st.error("Login Failed")
+
+        with tab2:
+            if USE_SUPABASE:
+                s_email = st.text_input("Email", key="s_email")
+                s_pass = st.text_input("Password", type="password", key="s_pass")
+                if st.button("Sign Up"):
+                    if handle_signup(s_email, s_pass):
+                        st.success("Account created! Please log in.")
+                    else:
+                        st.error("Signup Failed")
             else:
-                st.error("Invalid Username or Password")
-        
-        st.markdown("---")
-        st.caption("Lost password? Contact support@auditassistant.com")
+                st.info("Sign Up unavailable in Offline Mode.")
 
 # --- 1. HELPER FUNCTIONS ---
 
@@ -314,12 +403,10 @@ else:
 
     # SIDEBAR
     with st.sidebar:
-        user = st.session_state.username
+        user_email = st.session_state.user_email
+        current_usage = get_usage_count(user_email)
         
-        # Load Usage
-        current_usage = get_user_usage(user)
-        
-        st.write(f"Logged in as: **{user}**")
+        st.write(f"Logged in as: **{user_email}**")
         st.info(f"Usage: {current_usage} / {DAILY_LIMIT} Free Runs")
         
         st.header("1. Upload Data")
@@ -362,17 +449,16 @@ else:
         st.header("4. Execution")
         random_seed = st.number_input("Random Seed", value=12345, step=1)
         
-        # RUN BUTTON (WITH GATEKEEPER CHECK)
+        # RUN BUTTON (WITH GATEKEEPER)
         if st.button("Run Sampling"):
             if current_usage >= DAILY_LIMIT:
                 st.error(f"❌ Daily limit reached ({DAILY_LIMIT}/{DAILY_LIMIT}). Please upgrade to Pro.")
             else:
-                # Only run if under limit
-                increment_user_usage(user)
                 if uploaded_file is not None:
                     try:
                         uploaded_file.seek(0)
                         df_check = pd.read_csv(uploaded_file)
+                        increment_usage(user_email) # Update DB
                         st.session_state.trigger_run = True
                         st.rerun() # Refresh to show new count
                     except Exception as e:
@@ -389,8 +475,10 @@ else:
         # LOGOUT BUTTON
         st.markdown("---")
         if st.button("🚪 Log Out"):
+            if USE_SUPABASE:
+                supabase.auth.sign_out()
             st.session_state.logged_in = False
-            st.session_state.username = ""
+            st.session_state.user_email = ""
             st.session_state.audit_result_df = None
             st.rerun()
 
